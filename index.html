@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Estimator RAB — Sistem SPC</title>
+  <meta name="description"
+    content="Estimator Rencana Anggaran Biaya (RAB) kolaboratif real-time. Edit bersama seperti Google Sheets." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=9" />
+</head>
+
+<body>
+  <!-- ── HEADER ── -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-mark">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <rect width="28" height="28" rx="8" fill="url(#logoGrad)" />
+          <path d="M7 9h14M7 14h9M7 19h11" stroke="#fff" stroke-width="2" stroke-linecap="round" />
+          <defs>
+            <linearGradient id="logoGrad" x1="0" y1="0" x2="28" y2="28">
+              <stop offset="0%" stop-color="#6366f1" />
+              <stop offset="100%" stop-color="#8b5cf6" />
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <div class="header-title-group">
+        <h1 class="header-title">Estimator RAB</h1>
+        <span class="header-sub">Sistem SPC · Kolaboratif Real-Time</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="sync-indicator" id="syncIndicator">
+        <span class="sync-dot" id="syncDot"></span>
+        <span id="syncText">Terhubung</span>
+      </div>
+      <div class="presence-avatars" id="presenceAvatars">
+        <!-- Avatars akan di-render dari app.js -->
+      </div>
+      <div class="user-avatar" id="userAvatarBadge" title="Kamu"></div>
+    </div>
+  </header>
+
+  <!-- ── PROJECT INFO BAR ── -->
+  <div class="project-bar">
+    <div class="project-info" id="projectInfo">
+      <span class="project-label">Proyek:</span>
+      <span class="project-name" id="projectName" contenteditable="true" spellcheck="false"
+        title="Klik untuk mengubah nama proyek">Proyek Baru</span>
+    </div>
+
+    <div class="project-actions">
+      <button class="btn btn-ghost" id="btnAddRow">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+        Tambah Baris
+      </button>
+      <button class="btn btn-ghost" id="btnExport">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M2 10v2h10v-2M7 1v8M4 6l3 3 3-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            stroke-linejoin="round" />
+        </svg>
+        Ekspor CSV
+      </button>
+    </div>
+  </div>
+
+  <!-- ── MAIN TABLE WRAPPER ── -->
+  <main class="table-container">
+    <div class="table-scroll-wrap" id="tableScrollWrap">
+      <div class="table-loading" id="tableLoading">
+        <div class="spinner"></div>
+        <span>Memuat data...</span>
+      </div>
+      <table class="rab-table" id="rabTable" style="display:none;">
+        <thead>
+          <tr>
+            <th class="col-no">No.</th>
+            <th class="col-uraian">Uraian Pekerjaan</th>
+            <th class="col-vol">Volume</th>
+            <th class="col-sat">Satuan</th>
+            <th class="col-hsat">Harga Satuan (Rp)</th>
+            <th class="col-jml">Jumlah Harga (Rp)</th>
+            <th class="col-ket">Keterangan</th>
+            <th class="col-act"></th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+        <tfoot id="tableFoot">
+          <tr class="total-row">
+            <td colspan="5" class="total-label">TOTAL BIAYA</td>
+            <td class="total-value" id="totalValue">Rp 0</td>
+            <td colspan="2"></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  </main>
+
+  <!-- ── TOAST NOTIFICATION ── -->
+  <div class="toast-container" id="toastContainer"></div>
+
+
+  <script type="module" src="app.js?v=11"></script>
+</body>
+
+</html>
