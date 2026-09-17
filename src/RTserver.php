@@ -36,7 +36,12 @@ class RTserver implements MessageComponentInterface {
                 $this->handleJoin($from, $data);
                 break;
             case 'data':
+                // Dipakai untuk perubahan struktural: tambah / hapus baris
                 $this->handleData($from, $data);
+                break;
+            case 'rowUpdate':
+                // ✅ BARU: edit 1 sel → hanya 1 baris yang dikirim & di-broadcast
+                $this->handleRowUpdate($from, $data);
                 break;
             case 'locks':
                 $this->handleLocks($from, $data);
@@ -52,6 +57,7 @@ class RTserver implements MessageComponentInterface {
                     'type'   => 'editorStop',
                     'key'    => $data['key'] ?? null,
                     'userId' => $this->meta[$from->resourceId]['userId'] ?? null,
+                    'editor' => $data['editor'] ?? null,
                 ], $from);
                 break;
             case 'presence':
@@ -63,14 +69,24 @@ class RTserver implements MessageComponentInterface {
             case 'action':
                 $this->handleAction($from, $data);
                 break;
+            case 'saveState':
+                $this->handleSaveState($from, $data);
+                break;
         }
     }
 
     protected function ensureState($projectId) {
         if (!isset($this->state[$projectId])) {
             $stored = $this->database->loadProject($projectId);
+            // Simpan data sebagai map id => row untuk O(1) patch per baris
+            $dataMap = [];
+            foreach ($stored['data'] as $row) {
+                if (isset($row['id'])) {
+                    $dataMap[$row['id']] = $row;
+                }
+            }
             $this->state[$projectId] = [
-                'data'        => $stored['data'],
+                'data'        => $dataMap,
                 'locks'       => new \stdClass(),
                 'presence'    => new \stdClass(),
                 'projectName' => $stored['projectName'],
@@ -98,34 +114,97 @@ class RTserver implements MessageComponentInterface {
         $this->ensureState($projectId);
 
         // kirim state lengkap yang sudah ada ke user yang baru join
-        // (ini gantinya onValue() Firebase yang otomatis kasih data awal)
+        // data dikirim sebagai array biasa (bukan map) agar format FE tetap konsisten
         $conn->send(json_encode([
             'type'        => 'state',
-            'data'        => $this->state[$projectId]['data'],
+            'data'        => array_values($this->state[$projectId]['data']),
             'locks'       => $this->state[$projectId]['locks'],
             'presence'    => $this->state[$projectId]['presence'],
             'projectName' => $this->state[$projectId]['projectName'],
         ]));
     }
 
+    /**
+     * Handle update SELURUH tabel — dipakai saat add/delete baris (perubahan struktural).
+     * Untuk edit sel biasa, gunakan handleRowUpdate() yang jauh lebih hemat.
+     */
     protected function handleData($from, $data) {
         $meta = $this->meta[$from->resourceId] ?? null;
         if (!$meta) return;
         $projectId = $meta['projectId'];
         $this->ensureState($projectId);
 
-        $this->state[$projectId]['data'] = $data['payload'] ?? [];
+        // Rebuild map dari array yang dikirim FE
+        $dataMap = [];
+        foreach (($data['payload'] ?? []) as $row) {
+            if (isset($row['id'])) {
+                $dataMap[$row['id']] = $row;
+            }
+        }
+        $this->state[$projectId]['data'] = $dataMap;
+
         $this->database->saveProject(
             $projectId,
-            $this->state[$projectId]['data'],
+            array_values($this->state[$projectId]['data']),
             $this->state[$projectId]['projectName']
         );
 
+        // Broadcast semua data (struktur berubah: baris ditambah/dihapus)
         $this->broadcastToRoom($projectId, [
             'type'    => 'data',
-            'payload' => $this->state[$projectId]['data'],
+            'payload' => array_values($this->state[$projectId]['data']),
             'editor'  => $data['editor'] ?? null,
         ], $from);
+    }
+
+    /**
+     * ✅ BARU: Handle update SATU baris saja.
+     * Hemat bandwidth — hanya 1 baris yang dikirim ke semua klien,
+     * bukan seluruh tabel.
+     */
+    protected function handleRowUpdate($from, $data) {
+        $meta = $this->meta[$from->resourceId] ?? null;
+        if (!$meta) return;
+        $projectId = $meta['projectId'];
+        $this->ensureState($projectId);
+
+        $row = $data['payload'] ?? null;
+        if (!$row || !isset($row['id'])) return;
+
+        // Patch hanya 1 baris di state (O(1) berkat map)
+        $this->state[$projectId]['data'][$row['id']] = $row;
+
+        // Simpan ke database HANYA jika persist !== false
+        if (!isset($data['persist']) || $data['persist'] !== false) {
+            $this->database->saveProject(
+                $projectId,
+                array_values($this->state[$projectId]['data']),
+                $this->state[$projectId]['projectName']
+            );
+        }
+
+        // Broadcast HANYA 1 baris ke klien lain — inilah penghematannya ✅
+        $this->broadcastToRoom($projectId, [
+            'type'    => 'rowUpdate',
+            'payload' => $row,
+            'editor'  => $data['editor'] ?? null,
+        ], $from);
+    }
+
+    /**
+     * ✅ Simpan state memory saat ini ke SQLite DB 1x saat user menutup modal.
+     */
+    protected function handleSaveState($from, $data) {
+        $meta = $this->meta[$from->resourceId] ?? null;
+        if (!$meta) return;
+        $projectId = $meta['projectId'];
+        $this->ensureState($projectId);
+
+        $this->database->saveProject(
+            $projectId,
+            array_values($this->state[$projectId]['data']),
+            $this->state[$projectId]['projectName']
+        );
     }
 
     protected function handleLocks($from, $data) {
@@ -175,7 +254,7 @@ class RTserver implements MessageComponentInterface {
         $this->database->saveProjectName(
             $projectId,
             $this->state[$projectId]['projectName'],
-            $this->state[$projectId]['data']
+            array_values($this->state[$projectId]['data'])
         );
 
         $this->broadcastToRoom($projectId, [

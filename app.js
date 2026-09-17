@@ -1,56 +1,109 @@
 'use strict';
 
 // ══════════════════════════════════════════════
-// KONEKSI REALTIME — sebelumnya Firebase, sekarang WebSocket ke server PHP
+// KONEKSI REALTIME — WebSocket ke server PHP
 // ══════════════════════════════════════════════
 const configuredWsUrl = window.RAB_WS_URL || new URLSearchParams(location.search).get('ws');
 const WS_URL = configuredWsUrl || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8080`;
 const PROJECT_ID = new URLSearchParams(location.search).get('project') || 'default';
 
 let ws = null;
+
+// ─────────────────────────────────────────────
+// MODUL PRE-DEFINED — 8 modul RAB standar konstruksi
+// Dibuat otomatis saat pertama kali project dibuka
+// ─────────────────────────────────────────────
+const PREDEFINED_MODULES = [
+  { name: 'Pekerjaan Persiapan',  paletteIdx: 0 },
+  { name: 'Pekerjaan Pondasi',    paletteIdx: 1 },
+  { name: 'Pekerjaan Struktur',   paletteIdx: 2 },
+  { name: 'Pekerjaan Dinding',    paletteIdx: 3 },
+  { name: 'Pekerjaan Atap',       paletteIdx: 4 },
+  { name: 'Pekerjaan Lantai',     paletteIdx: 5 },
+  { name: 'Pekerjaan Finishing',  paletteIdx: 6 },
+  { name: 'Pekerjaan MEP',        paletteIdx: 7 },
+];
 let wsReconnectDelay = 1000;
 
-// Configurasi user
-const DEBOUNCE = 80;     // Jeda (ms) sebelum data dikirim ke server setelah user berhenti mengetik
-const LOCK_TTL = 3000;   // Berapa lama (ms) sebuah sel dianggap "dikunci" oleh seseorang
+const DEBOUNCE = 80;
+const LOCK_TTL = 3000;
 
-// User ID & Color — dibuat acak tiap kali halaman dibuka
+// User ID & Color
 const myId    = 'user_' + Math.random().toString(36).slice(2, 7);
-const myColor = "#" + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
-const myName  = prompt("Masukan nama anda") || "User";
+const myColor = '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
+const myName  = prompt('Masukan nama anda') || 'User';
 
-// STATE — variabel yang menyimpan data aktif selama halaman terbuka
-let tableData    = [];  // Semua baris tabel RAB
-let activeLocks  = {};  // Sel mana saja yang sedang diedit (oleh siapa)
-let remoteEditors = {}; // Editor remote, dipertahankan sampai menerima editorStop
-let debounceMap  = {};  // Penyimpan timer debounce per sel
-let editDirtyMap = {};  // Menandai sel yang berubah selama sesi edit aktif
-let presenceData = {};  // Daftar pengguna yang sedang online
+// STATE
+let tableData    = [];  // Semua baris + module headers (_type:'moduleHeader')
+let activeLocks  = {};  // Sel yang sedang diedit
+let remoteEditors = {};
+let debounceMap  = {};
+let editDirtyMap = {};
+let presenceData = {};
+const remoteEditHistory = {};
+const undoStack = [];
+const changedModuleIds = new Set();
 
-// Komponen DOM — referensi ke elemen HTML yang sering dipakai
-const tableBody       = document.getElementById('tableBody');
-const tableEl         = document.getElementById('rabTable');
+// Module modal state
+let openModuleId = null; // moduleId yang sedang terbuka di modal
+
+// Palet warna & ikon untuk kartu modul
+const MODULE_PALETTES = [
+  { bg: '#06141B', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-7 9 7M5 10v10h14V10M9 20v-6h6v6"/></svg>', image: 'https://images.unsplash.com/photo-1503387762-592deb58ef4e?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#11212D', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M6 20V9h12v11M4 9h16L12 4 4 9Zm6 5h4"/></svg>', image: 'https://images.unsplash.com/photo-1590725121839-892b458a74fe?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#253745', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V7l8-4 8 4v13M8 20v-6h8v6M8 9h.01M12 9h.01M16 9h.01"/></svg>', image: 'https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#4A5C6A', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V5h16v15M8 9h8M8 13h8M8 17h5"/></svg>', image: 'https://images.unsplash.com/photo-1531835551805-16d864c8d311?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#9BA8AB', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 12 9-7 9 7M5 11v9h14v-9M8 20v-5h8v5"/></svg>', image: 'https://images.unsplash.com/photo-1632759145351-1d592919f522?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#CCD0CF', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16h12M8 13h8M10 10h4M12 5v5"/></svg>', image: 'https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#253745', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M6 20V8h12v12M9 8V5h6v3M9 12h6M9 16h6"/></svg>', image: 'https://images.unsplash.com/photo-1586023492125-27b2c045efd7?auto=format&fit=crop&w=900&q=80' },
+  { bg: '#4A5C6A', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V8h14v12M8 8V5h8v3M8 12h8M8 16h8"/></svg>', image: 'https://images.unsplash.com/photo-1558008258-3256797b43f3?auto=format&fit=crop&w=900&q=80' },
+];
+
+// DOM refs
+const modulesGrid     = document.getElementById('modulesGrid');
 const tableLoading    = document.getElementById('tableLoading');
 const totalValueEl    = document.getElementById('totalValue');
 const syncDot         = document.getElementById('syncDot');
 const syncText        = document.getElementById('syncText');
 const toastCont       = document.getElementById('toastContainer');
 const userAvatarBadge = document.getElementById('userAvatarBadge');
+const moduleModal     = document.getElementById('moduleModal');
+const modalTableBody  = document.getElementById('modalTableBody');
+const modalModuleName = document.getElementById('modalModuleName');
+const modalModuleMeta = document.getElementById('modalModuleMeta');
+const modalTotal      = document.getElementById('modalTotal');
+const modalIcon       = document.getElementById('modalIcon');
+const btnUndo         = document.getElementById('btnUndo');
 
 // ─────────────────────────────────────────────
-// INISIALISASI — dijalankan otomatis saat halaman pertama kali dibuka
+// INISIALISASI
 // ─────────────────────────────────────────────
 (function init() {
-  // Tampilkan avatar pengguna di pojok kanan atas
   userAvatarBadge.style.background = myColor;
   userAvatarBadge.textContent = myName.charAt(0);
   userAvatarBadge.title = myName;
 
-  // Pasang tombol "Tambah Baris" dan "Ekspor CSV"
-  document.getElementById('btnAddRow').addEventListener('click', addNewRow);
   document.getElementById('btnExport').addEventListener('click', exportCSV);
+  btnUndo.addEventListener('click', undoLastEdit);
+  document.getElementById('btnCloseModal').addEventListener('click', closeModuleModal);
+  document.getElementById('modalBtnAddRow').addEventListener('click', () => {
+    if (openModuleId) addNewRow(openModuleId);
+  });
 
-  // Kirim nama proyek ke server saat pengguna mengetik (dengan jeda 300ms)
+  // Tutup modal saat klik overlay (di luar modal box)
+  moduleModal.addEventListener('click', e => {
+    if (e.target === moduleModal) closeModuleModal();
+  });
+
+  // Escape tutup modal
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && openModuleId) closeModuleModal();
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && openModuleId) {
+      e.preventDefault();
+      undoLastEdit();
+    }
+  });
+
   const titleEl = document.getElementById('projectName');
   let projectNameDebounce;
   if (titleEl) {
@@ -62,86 +115,104 @@ const userAvatarBadge = document.getElementById('userAvatarBadge');
     });
   }
 
-  // Bersihkan kunci kita di layar sendiri saat tab ditutup.
-  // Catatan: server otomatis melepas lock & presence milik kita begitu
-  // koneksi WebSocket terputus (event onClose di RTserver.php) — jadi
-  // gak perlu trik onDisconnect/beforeunload manual seperti di Firebase.
   window.addEventListener('beforeunload', () => {
+    if (openModuleId) {
+      wsSend({ type: 'saveState' });
+      releaseModuleLock(openModuleId);
+    }
     clearMyLocks();
   });
 
   connectWS();
   setSyncState('connecting');
+  updateUndoButton();
 })();
 
 // ─────────────────────────────────────────────
-// Buka koneksi WebSocket ke server realtime, dan pasang semua
-// penanganan pesan masuk (gantinya onValue() di versi Firebase)
+// WEBSOCKET
 // ─────────────────────────────────────────────
 function connectWS() {
   ws = new WebSocket(WS_URL);
 
-  ws.onopen = function () {
+  ws.onopen = () => {
     wsReconnectDelay = 1000;
     setSyncState('ok');
-
-    ws.send(JSON.stringify({
-      type: 'join',
-      projectId: PROJECT_ID,
-      userId: myId,
-    }));
-
-    // Kirim sinyal "saya online", lalu ulangi tiap 3 detik selama koneksi hidup
+    ws.send(JSON.stringify({ type: 'join', projectId: PROJECT_ID, userId: myId }));
     sendHeartbeat();
     if (window.__heartbeatInterval) clearInterval(window.__heartbeatInterval);
     window.__heartbeatInterval = setInterval(sendHeartbeat, 3000);
   };
 
-  ws.onmessage = function (event) {
+  ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'state') {
-      // state lengkap dikirim server sekali, begitu kita baru join
-      const prevDataLength = tableData.length;
       tableData    = msg.data || [];
       activeLocks  = msg.locks || {};
       remoteEditors = {};
       presenceData = msg.presence || {};
 
-      renderTable(true);
+      renderModules();
       updateTotal();
       renderPresence();
+      syncAllModuleBrokers(); // tampilkan broker untuk lock yang sudah ada
 
       const titleEl = document.getElementById('projectName');
       if (titleEl && msg.projectName) titleEl.textContent = msg.projectName;
       return;
     }
 
+    if (msg.type === 'rowUpdate') {
+      // ✅ Edit 1 sel → hanya 1 baris yang dikirim & di-broadcast
+      const updatedRow = msg.payload;
+      if (updatedRow && updatedRow.id != null) {
+        const idx = tableData.findIndex(i => i.id === updatedRow.id);
+        if (idx !== -1) {
+          tableData[idx] = updatedRow;
+          patchRow(updatedRow);        // update sel di modal (jika terbuka)
+          updateTotal();
+          updateModalTotal();
+          updateCardInfo(updatedRow.moduleId);
+        }
+        if (msg.editor?.key && msg.editor.userId !== myId) {
+          activeLocks[msg.editor.key] = msg.editor;
+          remoteEditors[msg.editor.key] = msg.editor;
+          syncRemoteLocks();
+          syncAllModuleBrokers();
+        }
+      }
+      return;
+    }
+
     if (msg.type === 'data') {
-      const prevDataLength = tableData.length;
       tableData = msg.payload || [];
       if (msg.editor?.key && msg.editor.userId !== myId) {
         activeLocks[msg.editor.key] = msg.editor;
         remoteEditors[msg.editor.key] = msg.editor;
       }
-      renderTable(prevDataLength !== tableData.length);
+      renderModules();
       updateTotal();
       syncRemoteLocks();
+      syncAllModuleBrokers();
+      // Refresh modal jika sedang terbuka
+      if (openModuleId) refreshModal(openModuleId);
       return;
     }
 
     if (msg.type === 'locks') {
       activeLocks = msg.payload || {};
-      renderTable(false);
       syncRemoteLocks();
+      syncAllModuleBrokers();
       return;
     }
 
     if (msg.type === 'editorStart') {
       if (msg.editor?.key && msg.editor.userId !== myId) {
+        if (!msg.editor.key.startsWith('__module_')) rememberRemoteEdit(msg.editor);
         activeLocks[msg.editor.key] = msg.editor;
         remoteEditors[msg.editor.key] = msg.editor;
         syncRemoteLocks();
+        syncAllModuleBrokers(); // ← broker banner muncul di atas kartu
       }
       return;
     }
@@ -151,6 +222,16 @@ function connectWS() {
         delete activeLocks[msg.key];
         delete remoteEditors[msg.key];
         syncRemoteLocks();
+        syncAllModuleBrokers();
+
+        // Jika ini adalah module lock dari user lain, tampilkan banner "Selesai Edit" dengan tombol Oke
+        if (msg.key.startsWith('__module_') && msg.editor && msg.editor.userId !== myId) {
+          const moduleId = msg.editor.moduleId || msg.key.replace('__module_', '');
+          const historyKey = `${msg.editor.userId}_${moduleId}`;
+          const editedParts = remoteEditHistory[historyKey] || [];
+          delete remoteEditHistory[historyKey];
+          showModuleCompletedBroker(moduleId, msg.editor, editedParts);
+        }
       }
       return;
     }
@@ -162,7 +243,6 @@ function connectWS() {
     }
 
     if (msg.type === 'action') {
-      // notifikasi aksi user lain (tambah/hapus baris), muncul di layar kita juga
       showToast(msg.text, 'info');
       return;
     }
@@ -170,7 +250,6 @@ function connectWS() {
     if (msg.type === 'projectName') {
       const titleEl = document.getElementById('projectName');
       if (!titleEl) return;
-      // Jangan timpa teks jika pengguna sedang mengedit nama proyek
       if (document.activeElement !== titleEl && msg.payload) {
         titleEl.textContent = msg.payload;
       }
@@ -178,85 +257,47 @@ function connectWS() {
     }
   };
 
-  ws.onclose = function () {
+  ws.onclose = () => {
     setSyncState('offline');
     setTimeout(connectWS, wsReconnectDelay);
     wsReconnectDelay = Math.min(wsReconnectDelay * 2, 10000);
   };
 
-  ws.onerror = function () {
-    ws.close();
-  };
+  ws.onerror = () => ws.close();
 }
 
-// ─────────────────────────────────────────────
-// Kirim pesan ke server, kalau koneksi lagi gak hidup ya diabaikan
-// (nanti kekirim ulang otomatis lewat mekanisme lain begitu reconnect)
-// ─────────────────────────────────────────────
 function wsSend(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-  }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-// ─────────────────────────────────────────────
-// Menyimpan seluruh data tabel ke server
-// Dipanggil setiap kali ada perubahan isi sel
-// ─────────────────────────────────────────────
 function saveToStorage(editor = null) {
   setSyncState('syncing');
   wsSend({ type: 'data', payload: tableData, editor });
-  // Tunda status "ok" 200ms agar animasi "menyimpan" terlihat
   setTimeout(() => setSyncState('ok'), 200);
 }
 
-// ─────────────────────────────────────────────
-// Menyimpan data kunci (lock) ke server
-// Dipanggil setiap kali pengguna mulai atau berhenti mengedit sebuah sel
-// ─────────────────────────────────────────────
 function saveLocksToStorage() {
   wsSend({ type: 'locks', payload: activeLocks });
 }
 
-// ─────────────────────────────────────────────
-// Menghapus semua kunci milik pengguna ini dari daftar kunci
-// Dipanggil saat tab ditutup agar sel tidak terkunci terus untuk orang lain
-// ─────────────────────────────────────────────
 function clearMyLocks() {
   for (const key in activeLocks) {
-    if (activeLocks[key].userId === myId) {
-      delete activeLocks[key];
-    }
+    if (activeLocks[key].userId === myId) delete activeLocks[key];
   }
   saveLocksToStorage();
 }
 
-// ─────────────────────────────────────────────
-// Mengirim sinyal "saya masih online" ke server
-// Berisi nama, warna, dan waktu terakhir aktif
-// ─────────────────────────────────────────────
 function sendHeartbeat() {
-  wsSend({
-    type: 'presence',
-    userId: myId,
-    entry: { name: myName, color: myColor, ts: Date.now() },
-  });
+  wsSend({ type: 'presence', userId: myId, entry: { name: myName, color: myColor, ts: Date.now() } });
 }
 
-// ─────────────────────────────────────────────
-// Menampilkan avatar pengguna lain yang sedang online di header
-// Hanya tampilkan yang aktif dalam 10 detik terakhir
-// ─────────────────────────────────────────────
 function renderPresence() {
   const container = document.getElementById('presenceAvatars');
   if (!container) return;
-
   container.innerHTML = '';
   const now = Date.now();
-
   for (const pId in presenceData) {
-    if (pId === myId) continue; // Lewati diri sendiri, tidak perlu tampil
-
+    if (pId === myId) continue;
     const p = presenceData[pId];
     if (now - p.ts <= 10000) {
       const div = document.createElement('div');
@@ -270,39 +311,282 @@ function renderPresence() {
 }
 
 /* ════════════════════════════════════════════
-   RENDER TABLE
+   MODULE HELPERS
    ════════════════════════════════════════════ */
 
-// ─────────────────────────────────────────────
-// Menggambar ulang tabel RAB di layar berdasarkan data terbaru
-// fullRender=true → hapus dan buat ulang semua baris (dipakai saat jumlah baris berubah)
-// fullRender=false → hanya perbarui isi sel yang berubah saja (lebih cepat)
-// ─────────────────────────────────────────────
-function renderTable(fullRender = false) {
-  if (fullRender) {
-    tableBody.innerHTML = '';
-    for (const item of tableData) {
-      tableBody.appendChild(createRow(item));
-    }
-    tableLoading.style.display = 'none';
-    tableEl.style.display = 'table';
-  } else {
-    for (const item of tableData) {
-      patchRow(item);
-    }
+function getModuleHeaders() {
+  return tableData.filter(r => r._type === 'moduleHeader');
+}
+
+function getModuleRows(moduleId) {
+  return tableData.filter(r => !r._type && r.moduleId === moduleId);
+}
+
+// Pastikan semua modul pre-defined ada. Jika belum ada (project baru),
+// buat semua 8 modul sekaligus. Row lama tanpa moduleId → masuk modul pertama.
+function ensureDefaultModule() {
+  let headers = getModuleHeaders();
+
+  if (headers.length === 0) {
+    // Project baru — buat semua modul pre-defined
+    PREDEFINED_MODULES.forEach((m, idx) => {
+      const moduleId = `mod_preset_${idx}`;
+      headers.push({
+        id:         `__${moduleId}`,
+        _type:      'moduleHeader',
+        moduleId,
+        name:       m.name,
+        paletteIdx: m.paletteIdx,
+      });
+    });
+    // Sisipkan semua header di awal tableData
+    tableData.unshift(...headers);
   }
+
+  // Assign row lama yang belum punya moduleId ke modul pertama
+  const firstId = headers[0].moduleId;
+  tableData.forEach(r => { if (!r._type && !r.moduleId) r.moduleId = firstId; });
+}
+
+function getModulePalette(header) {
+  const predefinedIndex = PREDEFINED_MODULES.findIndex(module => module.name === header.name);
+  const idx = predefinedIndex >= 0
+    ? PREDEFINED_MODULES[predefinedIndex].paletteIdx
+    : (header.paletteIdx ?? 0) % MODULE_PALETTES.length;
+  return MODULE_PALETTES[idx];
+}
+
+/* ════════════════════════════════════════════
+   RENDER MODULES — kartu kompak di grid
+   ════════════════════════════════════════════ */
+
+function renderModules() {
+  ensureDefaultModule();
+  modulesGrid.innerHTML = '';
+  tableLoading.style.display = 'none';
+
+  const headers = getModuleHeaders();
+  headers.forEach((header, idx) => {
+    if (header.paletteIdx === undefined) header.paletteIdx = idx;
+    modulesGrid.appendChild(createModuleCard(header));
+  });
 }
 
 // ─────────────────────────────────────────────
-// Membuat satu baris tabel (<tr>) lengkap dengan semua sel dan tombol hapus
-// Menerima satu objek item (satu baris RAB) lalu mengembalikan elemen <tr>
+// Buat kartu kompak untuk 1 modul (tampilan grid)
+// Tidak ada tabel di dalam — tabel ada di modal
 // ─────────────────────────────────────────────
+function createModuleCard(header) {
+  const moduleId = header.moduleId;
+  const palette  = getModulePalette(header);
+  const rows     = getModuleRows(moduleId);
+  const total    = rows.reduce((s, r) => s + (r.jumlah || 0), 0);
+
+  // Wrapper (broker banner disisipkan sebelum .module-card)
+  const wrapper = document.createElement('div');
+  wrapper.className = 'module-card-wrapper';
+  wrapper.dataset.moduleCard = moduleId;
+
+  // Kartu
+  const card = document.createElement('div');
+  card.className = 'module-card';
+  card.addEventListener('click', e => {
+    // Klik di mana saja di kartu → buka modal
+    if (!e.target.closest('.btn-card-del')) openModuleModal(moduleId);
+  });
+
+  // ── Bagian atas: banner warna-warni (seperti foto di gambar) ──
+  const thumb = document.createElement('div');
+  thumb.className = 'module-card-thumb';
+  thumb.style.backgroundColor = palette.bg;
+  thumb.style.backgroundImage = `linear-gradient(180deg, rgba(6, 20, 27, .08), rgba(6, 20, 27, .72)), url("${palette.image}")`;
+
+  const thumbIcon = document.createElement('div');
+  thumbIcon.className = 'module-thumb-icon';
+  thumbIcon.innerHTML = palette.icon;
+
+  thumb.appendChild(thumbIcon);
+
+  // ── Body: nama modul + baris info ──
+  const body = document.createElement('div');
+  body.className = 'module-card-body';
+
+  const title = document.createElement('h3');
+  title.className = 'module-card-title';
+  title.textContent = header.name;
+
+  // Info rows (seperti "Jenis — Rumah" di gambar)
+  const infoRows = [
+    { label: 'Jumlah Bahan yang Dibutuhkan', value: `${rows.length} bahan`, attr: `data-card-rowcount="${moduleId}"` },
+    { label: 'Total Biaya',   value: formatCurrency(total),  attr: `data-card-total="${moduleId}"` },
+    { label: 'Status',        value: rows.length === 0 ? 'Kosong' : 'Ada Data', attr: '' },
+  ];
+
+  body.appendChild(title);
+  infoRows.forEach(info => {
+    const row = document.createElement('div');
+    row.className = 'module-info-row';
+    row.innerHTML = `
+      <span class="module-info-label">${info.label}</span>
+      <span class="module-info-value" ${info.attr}>${info.value}</span>`;
+    body.appendChild(row);
+  });
+
+  // ── Actions: tombol Edit + Hapus ──
+  const actions = document.createElement('div');
+  actions.className = 'module-card-actions';
+
+  const btnEdit = document.createElement('button');
+  btnEdit.className = 'btn-card-edit';
+  btnEdit.dataset.moduleEditBtn = moduleId;
+  btnEdit.innerHTML = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+    <path d="M9.5 1.5l3 3-8 8H1.5v-3l8-8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+  </svg> Edit`;
+  btnEdit.addEventListener('click', e => {
+    e.stopPropagation();
+    openModuleModal(moduleId);
+  });
+
+  actions.appendChild(btnEdit);
+
+  card.appendChild(thumb);
+  card.appendChild(body);
+  card.appendChild(actions);
+  wrapper.appendChild(card);
+
+  return wrapper;
+}
+
+// Update info di kartu (rowcount + total) tanpa rebuild
+function updateCardInfo(moduleId) {
+  const rows  = getModuleRows(moduleId);
+  const total = rows.reduce((s, r) => s + (r.jumlah || 0), 0);
+
+  const countEl = document.querySelector(`[data-card-rowcount="${moduleId}"]`);
+  const totalEl = document.querySelector(`[data-card-total="${moduleId}"]`);
+  if (countEl) countEl.textContent = `${rows.length} bahan`;
+  if (totalEl) totalEl.textContent = formatCurrency(total);
+}
+
+/* ════════════════════════════════════════════
+   MODULE MODAL — tabel editing muncul di overlay
+   ════════════════════════════════════════════ */
+
+// ─────────────────────────────────────────────
+// Buka modal untuk modul tertentu
+// Langsung broadcast editorStart dengan key __module_<moduleId>
+// agar user lain langsung tahu modul ini sedang dibuka
+// ─────────────────────────────────────────────
+function openModuleModal(moduleId) {
+  // Jika sudah ada modal terbuka, tutup dulu
+  if (openModuleId && openModuleId !== moduleId) closeModuleModal();
+
+  openModuleId = moduleId;
+  refreshModal(moduleId);
+  moduleModal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  // ── Broadcast module-level lock via editorStart ──
+  // Pakai key khusus: '__module_mod_xxx' agar tidak bentrok dengan key sel biasa
+  wsSend({
+    type: 'editorStart',
+    editor: {
+      key: `__module_${moduleId}`,
+      userId: myId,
+      name: myName,
+      color: myColor,
+      ts: Date.now(),
+    },
+  });
+  // Simpan di lokal DAN kirim ke server via locks message
+  // → server menyimpan lock ini, sehingga User B yang join belakangan juga dapat info ini
+  activeLocks[`__module_${moduleId}`] = { userId: myId, name: myName, color: myColor, ts: Date.now() };
+  saveLocksToStorage(); // ← kunci ini sekarang disimpan di server!
+}
+
+// ─────────────────────────────────────────────
+// Tutup modal & lepas module-level lock
+// ─────────────────────────────────────────────
+function closeModuleModal() {
+  if (!openModuleId) return;
+  const moduleId = openModuleId;
+  wsSend({ type: 'saveState' }); // ✅ Simpan seluruh perubahan ke DB SQLite saat modal ditutup
+  if (changedModuleIds.delete(moduleId)) {
+    const module = getModuleHeaders().find(header => header.moduleId === moduleId);
+    wsSend({ type: 'action', text: `${myName} mengedit modul ${module?.name || 'ini'}` });
+  }
+  releaseModuleLock(moduleId);
+  openModuleId = null;
+  moduleModal.classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+function releaseModuleLock(moduleId) {
+  wsSend({
+    type: 'editorStop',
+    key: `__module_${moduleId}`,
+    userId: myId,
+    editor: {
+      key: `__module_${moduleId}`,
+      moduleId: moduleId,
+      userId: myId,
+      name: myName,
+      color: myColor,
+    },
+  });
+  delete activeLocks[`__module_${moduleId}`];
+  saveLocksToStorage(); // ← beritahu server bahwa lock sudah dilepas
+  syncAllModuleBrokers();
+}
+
+// ─────────────────────────────────────────────
+// Render isi modal (header info + tbody)
+// ─────────────────────────────────────────────
+function refreshModal(moduleId) {
+  const header  = getModuleHeaders().find(h => h.moduleId === moduleId);
+  const rows    = getModuleRows(moduleId);
+  const palette = getModulePalette(header || { paletteIdx: 0 });
+  const total   = rows.reduce((s, r) => s + (r.jumlah || 0), 0);
+
+  // Header modal
+  modalModuleName.textContent = header?.name || 'Modul';
+  modalModuleMeta.textContent = `${rows.length} bahan yang dibutuhkan`;
+  modalTotal.textContent = formatCurrency(total);
+  modalIcon.innerHTML = palette.icon;
+  modalIcon.style.background = palette.bg;
+
+  // Tbody: beri data-module-tbody agar addNewRow / patchRow bisa menemukan elemen
+  modalTableBody.dataset.moduleTbody = moduleId;
+  modalTableBody.innerHTML = '';
+
+  if (rows.length === 0) {
+    const tr = document.createElement('tr');
+    tr.className = 'modal-empty-row';
+    tr.dataset.emptyFor = moduleId;
+    tr.innerHTML = `<td colspan="8">Belum ada bahan. Klik "+ Tambah Bahan" untuk memulai.</td>`;
+    modalTableBody.appendChild(tr);
+  } else {
+    rows.forEach(row => modalTableBody.appendChild(createRow(row)));
+  }
+}
+
+function updateModalTotal() {
+  if (!openModuleId) return;
+  const rows  = getModuleRows(openModuleId);
+  const total = rows.reduce((s, r) => s + (r.jumlah || 0), 0);
+  modalTotal.textContent = formatCurrency(total);
+  modalModuleMeta.textContent = `${rows.length} bahan yang dibutuhkan`;
+}
+
+/* ════════════════════════════════════════════
+   RENDER ROW — baris tabel (dipakai di modal)
+   ════════════════════════════════════════════ */
+
 function createRow(item) {
   const tr = document.createElement('tr');
   tr.dataset.id = item.id;
   tr.classList.add('row-new');
 
-  // Definisi kolom: nama field, bisa diedit atau tidak, tipe data, posisi teks
   const columns = [
     { key: 'no',           editable: false, type: 'number',   align: 'center', cssClass: 'td-no' },
     { key: 'uraian',       editable: true,  type: 'text',     align: 'left'   },
@@ -319,17 +603,16 @@ function createRow(item) {
     if (col.cssClass) td.className = col.cssClass;
 
     if (col.computed) {
-      // Kolom "jumlah" tidak bisa diedit langsung, nilainya hasil perkalian otomatis
-      td.innerHTML = `<span class="cell-editable cell-numeric cell-formatted positive" style="pointer-events:none; user-select:none;">${formatCurrency(item.jumlah)}</span>`;
+      td.innerHTML = `<span class="cell-editable cell-numeric cell-formatted positive" style="pointer-events:none;user-select:none;">${formatCurrency(item.jumlah)}</span>`;
     } else if (col.editable) {
-      // Kolom yang bisa diedit: buat div contenteditable dan pasang semua event
       const div = document.createElement('div');
       div.className = 'cell-editable';
       div.contentEditable = 'true';
       div.spellcheck = false;
-      div.dataset.field = col.key;
-      div.dataset.itemId = item.id;
-      div.dataset.type = col.type;
+      div.dataset.field    = col.key;
+      div.dataset.itemId   = item.id;
+      div.dataset.type     = col.type;
+      div.dataset.moduleId = item.moduleId;
 
       if (col.type === 'currency' || col.type === 'number') div.classList.add('cell-numeric');
       if (col.align === 'center') div.classList.add('cell-center');
@@ -340,7 +623,7 @@ function createRow(item) {
       div.addEventListener('input',   onCellInput);
       div.addEventListener('keydown', onCellKeydown);
 
-      // Jika sel ini sedang dikunci oleh pengguna lain, tampilkan indikator warna
+      // Tampilkan lock jika sudah ada
       const lockKey = `${item.id}_${col.key}`;
       const remoteLock = remoteEditors[lockKey] || activeLocks[lockKey];
       if (remoteLock && remoteLock.userId !== myId) {
@@ -350,7 +633,6 @@ function createRow(item) {
 
       td.appendChild(div);
     } else {
-      // Kolom tidak bisa diedit (misal: nomor urut) — cukup tampilkan teks biasa
       const span = document.createElement('span');
       span.style.cssText = 'display:block; padding:10px 14px; color:var(--text-muted);';
       if (col.type === 'number') {
@@ -364,12 +646,13 @@ function createRow(item) {
     tr.appendChild(td);
   }
 
-  // Tambahkan kolom aksi berisi tombol hapus baris
   const tdAct = document.createElement('td');
   tdAct.className = 'td-action col-act';
   tdAct.innerHTML = `
-    <button class="btn-del-row" data-id="${item.id}" title="Hapus baris">
-      <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 2l9 9M11 2l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <button class="btn-del-row" data-id="${item.id}" title="Hapus bahan">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+        <path d="M2 2l9 9M11 2l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
     </button>`;
   tdAct.querySelector('.btn-del-row').addEventListener('click', () => deleteRow(item.id));
   tr.appendChild(tdAct);
@@ -377,13 +660,9 @@ function createRow(item) {
   return tr;
 }
 
-// ─────────────────────────────────────────────
-// Memperbarui isi sel pada baris yang sudah ada (tanpa menghapus dan membuat ulang)
-// Dipakai saat data dari server berubah tapi jumlah baris tetap sama
-// ─────────────────────────────────────────────
 function patchRow(item) {
-  const tr = tableBody.querySelector(`tr[data-id="${item.id}"]`);
-  if (!tr) return; // Baris belum ada di DOM, biarkan createRow yang menangani
+  const tr = document.querySelector(`tr[data-id="${item.id}"]`);
+  if (!tr) return;
 
   tr.querySelectorAll('[data-field]').forEach(cell => {
     const field = cell.dataset.field;
@@ -391,22 +670,16 @@ function patchRow(item) {
     const activeLock = remoteEditors[lockKey] || activeLocks[lockKey];
     const isOtherLocked = activeLock && activeLock.userId !== myId;
 
-    // Jangan timpa sel yang sedang aktif diketik oleh pengguna ini
     if (document.activeElement === cell) return;
 
     if (field === 'jumlah') {
-      // Update kolom jumlah yang dihitung otomatis
       const span = cell.querySelector('span');
       if (span) span.textContent = formatCurrency(item.jumlah);
     } else if (cell.contentEditable === 'true') {
-      // Update isi sel jika nilainya berbeda dari yang tampil
       const newVal = displayValue(item[field], cell.dataset.type);
-      if (cell.textContent !== newVal) {
-        cell.textContent = newVal;
-      }
+      if (cell.textContent !== newVal) cell.textContent = newVal;
 
       if (isOtherLocked) {
-        // Pertahankan badge yang sama selama lock aktif agar tidak berkedip saat mengetik.
         if (!cell.classList.contains('editing-other') || !cell.parentElement.querySelector('.typing-label')) {
           cell.classList.add('editing-other');
           addTypingLabel(cell, activeLock);
@@ -422,13 +695,9 @@ function patchRow(item) {
 }
 
 /* ════════════════════════════════════════════
-   CELL EVENTS — kejadian saat pengguna berinteraksi dengan sel tabel
+   CELL EVENTS
    ════════════════════════════════════════════ */
 
-// ─────────────────────────────────────────────
-// Dipanggil saat pengguna mengklik (fokus ke) sebuah sel
-// Memberi warna hijau pada sel dan mengunci sel agar orang lain tahu kita sedang edit
-// ─────────────────────────────────────────────
 function onCellFocus(e) {
   const cell = e.currentTarget;
   const key = `${cell.dataset.itemId}_${cell.dataset.field}`;
@@ -436,13 +705,9 @@ function onCellFocus(e) {
   cell.classList.add('editing-you');
   sendLock(cell.dataset.itemId, cell.dataset.field, true);
   sendEditorPresence(cell, true);
-  selectAllContent(cell); // Otomatis pilih semua teks di sel saat diklik
+  selectAllContent(cell);
 }
 
-// ─────────────────────────────────────────────
-// Dipanggil saat pengguna pindah dari sel (blur/klik di tempat lain)
-// Menghapus warna hijau, melepas kunci, dan langsung menyimpan perubahan
-// ─────────────────────────────────────────────
 function onCellBlur(e) {
   const cell = e.currentTarget;
   const key = `${cell.dataset.itemId}_${cell.dataset.field}`;
@@ -453,48 +718,27 @@ function onCellBlur(e) {
   sendEditorPresence(cell, false);
 
   clearTimeout(debounceMap[key]);
-  saveCell(cell); // Simpan langsung tanpa menunggu debounce
+  saveCell(cell);
   delete editDirtyMap[key];
 
-  // Beri tahu user lain sekali saja, setelah sesi edit selesai.
   if (wasDirty) {
     const item = tableData.find(i => i.id === parseInt(cell.dataset.itemId));
-    const fieldLabel = {
-      uraian: 'Uraian', volume: 'Volume', satuan: 'Satuan',
-      harga_satuan: 'Harga Satuan', keterangan: 'Keterangan',
-    }[cell.dataset.field] || cell.dataset.field;
-    wsSend({ type: 'action', text: `${myName} mengubah ${fieldLabel} pada baris #${item?.no || '?'}` });
+    if (item?.moduleId) changedModuleIds.add(item.moduleId);
   }
 }
 
-// ─────────────────────────────────────────────
-// Dipanggil setiap kali pengguna mengetik sesuatu di dalam sel
-// Menghitung ulang jumlah jika yang diubah adalah volume atau harga satuan,
-// lalu menjadwalkan penyimpanan ke server setelah jeda singkat (debounce)
-// ─────────────────────────────────────────────
 function onCellInput(e) {
   const cell = e.currentTarget;
   const key = `${cell.dataset.itemId}_${cell.dataset.field}`;
   editDirtyMap[key] = true;
-
-  // Jika yang diubah volume atau harga satuan, hitung ulang kolom jumlah secara langsung
   if (cell.dataset.field === 'volume' || cell.dataset.field === 'harga_satuan') {
     updateComputedJumlah(cell);
   }
-
-  // Perbarui timestamp kunci agar tidak kedaluwarsa saat pengguna masih mengetik
   sendLock(cell.dataset.itemId, cell.dataset.field, true);
-
-  // Jadwalkan penyimpanan ke server setelah pengguna berhenti mengetik (debounce)
   clearTimeout(debounceMap[key]);
   debounceMap[key] = setTimeout(() => saveCell(cell), DEBOUNCE);
 }
 
-// ─────────────────────────────────────────────
-// Dipanggil saat pengguna menekan tombol keyboard di dalam sel
-// Enter → pindah ke baris berikutnya pada kolom yang sama
-// Escape → keluar dari sel (batal edit)
-// ─────────────────────────────────────────────
 function onCellKeydown(e) {
   if (e.key === 'Enter') {
     e.preventDefault();
@@ -505,19 +749,14 @@ function onCellKeydown(e) {
 }
 
 /* ════════════════════════════════════════════
-   LOGIKA CRUD & LOCK
+   CRUD & LOCK
    ════════════════════════════════════════════ */
 
-// ─────────────────────────────────────────────
-// Menyimpan nilai satu sel ke dalam data lokal lalu kirim ke server
-// Hanya menyimpan jika nilai benar-benar berubah (tidak menyimpan ulang yang sama)
-// ─────────────────────────────────────────────
 function saveCell(cell) {
   const itemId = parseInt(cell.dataset.itemId);
   const field  = cell.dataset.field;
   let rawValue = cell.textContent.trim();
 
-  // Ubah teks angka/mata uang menjadi angka murni sebelum disimpan
   if (cell.dataset.type === 'number' || cell.dataset.type === 'currency') {
     rawValue = parseFloat(rawValue.replace(/[^0-9.-]/g, '')) || 0;
   }
@@ -525,12 +764,11 @@ function saveCell(cell) {
   const itemIndex = tableData.findIndex(i => i.id === itemId);
   if (itemIndex === -1) return;
   const item = tableData[itemIndex];
-
-  // Tidak perlu simpan jika nilainya tidak berubah
   if (item[field] === rawValue) return;
+  const beforeValue = item[field];
+  const beforeJumlah = item.jumlah;
 
   const patch = { [field]: rawValue };
-  // Jika volume atau harga satuan berubah, hitung ulang jumlah harga
   if (field === 'volume' || field === 'harga_satuan') {
     const vol  = field === 'volume' ? rawValue : item.volume;
     const hsat = field === 'harga_satuan' ? rawValue : item.harga_satuan;
@@ -538,25 +776,61 @@ function saveCell(cell) {
   }
 
   Object.assign(item, patch);
-  updateTotal();
-  saveToStorage({
-    key: `${itemId}_${field}`,
-    userId: myId,
-    name: myName,
-    color: myColor,
-    ts: Date.now(),
+  undoStack.push({
+    itemId,
+    moduleId: item.moduleId,
+    field,
+    before: beforeValue,
+    after: rawValue,
+    beforeJumlah: field === 'volume' || field === 'harga_satuan' ? beforeJumlah : undefined,
+    afterJumlah: patch.jumlah,
   });
+  updateUndoButton();
+  updateTotal();
+  updateModalTotal();
+  updateCardInfo(item.moduleId);
 
-  // TODO: kirim juga ke controller PHP lewat AJAX buat disimpan permanen
-  // ke database, terpisah dari jalur WebSocket ini. Contoh:
-  // $.post('/rab/save_item', { itemId, field, value: rawValue });
+  // ✅ Kirim 1 baris yang berubah (persist: false agar TIDAK tulis DB per sel)
+  wsSend({
+    type: 'rowUpdate',
+    payload: item,
+    persist: false,
+    editor: { key: `${itemId}_${field}`, userId: myId, name: myName, color: myColor, ts: Date.now() },
+  });
+  setSyncState('syncing');
+  setTimeout(() => setSyncState('ok'), 200);
 }
 
-// ─────────────────────────────────────────────
-// Mengunci atau membuka kunci sebuah sel di server
-// isLocking=true → tandai sel sebagai "sedang diedit oleh saya"
-// isLocking=false → lepas kunci saat selesai mengedit
-// ─────────────────────────────────────────────
+function updateUndoButton() {
+  if (btnUndo) btnUndo.disabled = undoStack.length === 0;
+}
+
+function undoLastEdit() {
+  const lastEdit = undoStack.pop();
+  updateUndoButton();
+  if (!lastEdit) return;
+
+  const item = tableData.find(row => row.id === lastEdit.itemId);
+  if (!item || item.moduleId !== openModuleId || item[lastEdit.field] !== lastEdit.after) {
+    showToast('Undo dibatalkan karena bahan sudah berubah', 'warn');
+    return;
+  }
+
+  item[lastEdit.field] = lastEdit.before;
+  if (lastEdit.afterJumlah !== undefined) item.jumlah = lastEdit.beforeJumlah;
+  patchRow(item);
+  updateTotal();
+  updateModalTotal();
+  updateCardInfo(item.moduleId);
+  wsSend({
+    type: 'rowUpdate',
+    payload: item,
+    persist: false,
+    editor: { key: `${item.id}_${lastEdit.field}`, userId: myId, name: myName, color: myColor, ts: Date.now() },
+  });
+  showToast('Perubahan terakhir dibatalkan', 'info');
+}
+
 function sendLock(itemId, field, isLocking) {
   const key = `${itemId}_${field}`;
   if (isLocking) {
@@ -569,137 +843,159 @@ function sendLock(itemId, field, isLocking) {
 
 function sendEditorPresence(cell, isEditing) {
   const key = `${cell.dataset.itemId}_${cell.dataset.field}`;
-  wsSend(isEditing ? {
-    type: 'editorStart',
-    editor: { key, userId: myId, name: myName, color: myColor, ts: Date.now() },
-  } : {
-    type: 'editorStop',
-    key,
-    userId: myId,
-  });
+  const item = tableData.find(row => row.id === parseInt(cell.dataset.itemId));
+  const fieldLabels = {
+    uraian: 'Nama Bahan', volume: 'Volume', satuan: 'Satuan',
+    harga_satuan: 'Harga Satuan', keterangan: 'Keterangan',
+  };
+  wsSend(isEditing
+    ? { type: 'editorStart', editor: {
+        key, userId: myId, name: myName, color: myColor, ts: Date.now(),
+        moduleId: cell.dataset.moduleId,
+        itemNo: item?.no || '?',
+        field: cell.dataset.field,
+        fieldLabel: fieldLabels[cell.dataset.field] || cell.dataset.field,
+      } }
+    : { type: 'editorStop',  key, userId: myId });
+}
+
+function rememberRemoteEdit(editor) {
+  if (!editor.moduleId || !editor.field) return;
+  const historyKey = `${editor.userId}_${editor.moduleId}`;
+  const editedParts = remoteEditHistory[historyKey] || [];
+  const partKey = `${editor.itemNo}_${editor.field}`;
+  if (!editedParts.some(part => part.key === partKey)) {
+    editedParts.push({
+      key: partKey,
+      itemNo: editor.itemNo,
+      fieldLabel: editor.fieldLabel || editor.field,
+    });
+  }
+  remoteEditHistory[historyKey] = editedParts;
 }
 
 // ─────────────────────────────────────────────
-// Menambahkan baris baru kosong ke tabel RAB
-// Nomor urut otomatis diisi (lanjutan dari baris terakhir)
-// Setelah baris ditambah, kursor langsung pindah ke kolom "Uraian"
+// Tambah baris baru ke modul (lewat modal)
 // ─────────────────────────────────────────────
-function addNewRow() {
-  const maxNo = tableData.reduce((m, i) => Math.max(m, i.no || 0), 0);
+function addNewRow(moduleId) {
+  const moduleRows = getModuleRows(moduleId);
+  const maxNo = moduleRows.reduce((m, i) => Math.max(m, i.no || 0), 0);
   const newItem = {
-    id:           Date.now(), // ID unik berdasarkan waktu saat ini
-    no:           maxNo + 1,
-    uraian:       '',
-    volume:       0,
-    satuan:       'unit',
-    harga_satuan: 0,
-    jumlah:       0,
-    keterangan:   ''
+    id: Date.now(), moduleId,
+    no: maxNo + 1, uraian: '', volume: 0,
+    satuan: 'unit', harga_satuan: 0, jumlah: 0, keterangan: ''
   };
 
   tableData.push(newItem);
-  tableBody.appendChild(createRow(newItem));
-  updateTotal();
-  saveToStorage();
-  wsSend({ type: 'action', text: `${myName} menambahkan baris baru` });
 
-  // Fokus ke kolom "Uraian" pada baris baru setelah 50ms (tunggu DOM selesai)
+  // Hapus empty row placeholder
+  const emptyRow = document.querySelector(`tr[data-empty-for="${moduleId}"]`);
+  if (emptyRow) emptyRow.remove();
+
+  // Tambah ke tbody modal
+  const tbody = document.querySelector(`[data-module-tbody="${moduleId}"]`);
+  if (tbody) tbody.appendChild(createRow(newItem));
+
+  updateTotal();
+  updateModalTotal();
+  updateCardInfo(moduleId);
+  changedModuleIds.add(moduleId);
+  saveToStorage();
+
   setTimeout(() => {
-    const lastTr = tableBody.querySelector('tr:last-child');
+    const lastTr = tbody?.querySelector('tr:last-child');
     lastTr?.querySelector('.cell-editable[data-field="uraian"]')?.focus();
   }, 50);
 }
 
+// addNewModule() dihapus — modul sudah pre-defined otomatis
+
+// deleteModule() dihapus — modul pre-defined tidak bisa dihapus
+
 // ─────────────────────────────────────────────
-// Menghapus satu baris dari tabel RAB
-// Minta konfirmasi dulu, lalu animasi hapus, perbarui nomor urut, dan simpan ke server
+// Hapus satu baris
 // ─────────────────────────────────────────────
 function deleteRow(itemId) {
-  if (!confirm('Hapus baris ini?')) return;
+  const item = tableData.find(i => i.id === itemId);
+  const moduleId = item?.moduleId;
+  if (!confirm('Hapus bahan ini?')) return;
 
   tableData = tableData.filter(i => i.id !== itemId);
-  // Urutkan ulang nomor baris agar tetap 1, 2, 3, ...
-  tableData.forEach((item, idx) => { item.no = idx + 1; });
+  // Renumber dalam modul saja
+  getModuleRows(moduleId).forEach((r, idx) => { r.no = idx + 1; });
 
-  // Animasi baris menghilang ke kanan sebelum benar-benar dihapus dari DOM
-  const tr = tableBody.querySelector(`tr[data-id="${itemId}"]`);
+  const tr = document.querySelector(`tr[data-id="${itemId}"]`);
   if (tr) {
     tr.style.transition = 'opacity .2s, transform .2s';
     tr.style.opacity = '0';
     tr.style.transform = 'translateX(20px)';
-    setTimeout(() => tr.remove(), 200);
+    setTimeout(() => {
+      tr.remove();
+      // Tampilkan empty state jika modul kosong
+      if (getModuleRows(moduleId).length === 0) {
+        const tbody = document.querySelector(`[data-module-tbody="${moduleId}"]`);
+        if (tbody) {
+          const tr2 = document.createElement('tr');
+          tr2.className = 'modal-empty-row';
+          tr2.dataset.emptyFor = moduleId;
+          tr2.innerHTML = `<td colspan="8">Belum ada bahan. Klik "+ Tambah Bahan" untuk memulai.</td>`;
+          tbody.appendChild(tr2);
+        }
+      }
+    }, 200);
   }
+
   updateTotal();
+  updateModalTotal();
+  updateCardInfo(moduleId);
   saveToStorage();
-  showToast('Baris dihapus', 'info');
-  wsSend({ type: 'action', text: `${myName} menghapus sebuah baris` });
+  showToast('Bahan dihapus', 'info');
+  if (moduleId) changedModuleIds.add(moduleId);
 }
 
 /* ════════════════════════════════════════════
-   COMPUTED & UTILS — fungsi pembantu
+   COMPUTED & UTILS
    ════════════════════════════════════════════ */
 
-// ─────────────────────────────────────────────
-// Menghitung ulang kolom "Jumlah Harga" saat volume atau harga satuan berubah
-// Rumus: Jumlah = Volume × Harga Satuan
-// Langsung update tampilan tanpa harus menyimpan ke server dulu
-// ─────────────────────────────────────────────
 function updateComputedJumlah(editedCell) {
   const itemId = parseInt(editedCell.dataset.itemId);
-  const item = tableData.find(i => i.id === itemId);
+  const item   = tableData.find(i => i.id === itemId);
   if (!item) return;
 
-  const tr = tableBody.querySelector(`tr[data-id="${itemId}"]`);
+  const tr = document.querySelector(`tr[data-id="${itemId}"]`);
   if (!tr) return;
 
-  const volCell  = tr.querySelector('[data-field="volume"]');
-  const hsatCell = tr.querySelector('[data-field="harga_satuan"]');
-  const jmlCell  = tr.querySelector('[data-field="jumlah"] span');
-
-  const vol  = parseFloat(volCell?.textContent) || 0;
-  const hsat = parseFloat(hsatCell?.textContent.replace(/[^0-9.-]/g, '')) || 0;
+  const vol  = parseFloat(tr.querySelector('[data-field="volume"]')?.textContent) || 0;
+  const hsat = parseFloat(tr.querySelector('[data-field="harga_satuan"]')?.textContent.replace(/[^0-9.-]/g, '')) || 0;
   const jml  = vol * hsat;
 
+  const jmlCell = tr.querySelector('[data-field="jumlah"] span');
   if (jmlCell) jmlCell.textContent = formatCurrency(jml);
   item.jumlah = jml;
   updateTotal();
+  updateModalTotal();
+  updateCardInfo(item.moduleId);
 }
 
-// ─────────────────────────────────────────────
-// Menghitung dan menampilkan total semua biaya di bagian bawah tabel
-// Menjumlahkan kolom "jumlah" dari semua baris
-// ─────────────────────────────────────────────
 function updateTotal() {
-  const total = tableData.reduce((sum, item) => sum + (item.jumlah || 0), 0);
-  totalValueEl.textContent = formatCurrency(total);
+  const total = tableData.filter(r => !r._type).reduce((s, i) => s + (i.jumlah || 0), 0);
+  if (totalValueEl) totalValueEl.textContent = formatCurrency(total);
 }
 
-// ─────────────────────────────────────────────
-// Menampilkan label nama pengguna di atas sel yang sedang dikunci orang lain
-// Label berwarna sesuai warna pengguna tersebut agar mudah dibedakan
-// ─────────────────────────────────────────────
 function addTypingLabel(cell, lockInfo) {
   const parentTd = cell.parentElement;
-
-  // Hapus label lama jika ada, supaya tidak duplikat
   parentTd.querySelector('.typing-label')?.remove();
   const label = document.createElement('span');
   label.className = 'typing-label';
-
   const dot = document.createElement('span');
   dot.className = 'typing-label-dot';
   dot.textContent = (lockInfo.name || '?').charAt(0).toUpperCase();
   label.appendChild(dot);
-
   const nameText = document.createElement('span');
   nameText.textContent = lockInfo.name;
   label.appendChild(nameText);
-
-  // Warna label & border cell dikendalikan lewat 1 CSS variable, biar
-  // panah label (::after di CSS) ikut warna user yang sama juga
   parentTd.style.setProperty('--lock-color', lockInfo.color);
   cell.style.borderColor = lockInfo.color;
-
   parentTd.style.position = 'relative';
   parentTd.appendChild(label);
 }
@@ -712,14 +1008,11 @@ function removeTypingLabel(cell) {
   cell.style.boxShadow = '';
 }
 
-// ─────────────────────────────────────────────
-// Wrapper tambahan untuk patchRow: setelah update sel,
-// reset border dan bayangan pada sel yang tidak sedang dikunci siapapun
-// ─────────────────────────────────────────────
-const originalPatchRow = patchRow;
+// patchRow wrapper: reset border sel tak terkunci
+const _origPatchRow = patchRow;
 patchRow = function (item) {
-  originalPatchRow(item);
-  const tr = tableBody.querySelector(`tr[data-id="${item.id}"]`);
+  _origPatchRow(item);
+  const tr = document.querySelector(`tr[data-id="${item.id}"]`);
   if (!tr) return;
   tr.querySelectorAll('.cell-editable').forEach(cell => {
     if (!cell.classList.contains('editing-other') && !cell.classList.contains('editing-you')) {
@@ -729,51 +1022,25 @@ patchRow = function (item) {
   });
 };
 
-// ─────────────────────────────────────────────
-// Mengubah tampilan indikator sinkronisasi di header
-// 'ok' → titik hijau "Terhubung"
-// 'syncing' → titik berputar kuning "Menyimpan..."
-// 'connecting' → belum sempat connect sama sekali
-// 'offline' → koneksi WebSocket terputus, sedang mencoba nyambung ulang
-// ─────────────────────────────────────────────
 function setSyncState(state) {
   syncDot.className = 'sync-dot';
-  if (state === 'ok') {
-    syncText.textContent = 'Terhubung';
-  } else if (state === 'syncing') {
-    syncDot.classList.add('syncing');
-    syncText.textContent = 'Menyimpan...';
-  } else if (state === 'connecting') {
-    syncText.textContent = 'Menghubungkan...';
-  } else if (state === 'offline') {
-    syncText.textContent = 'Terputus, menyambung ulang...';
-  }
+  if (state === 'ok')         { syncText.textContent = 'Terhubung'; }
+  else if (state === 'syncing')  { syncDot.classList.add('syncing'); syncText.textContent = 'Menyimpan...'; }
+  else if (state === 'connecting') { syncText.textContent = 'Menghubungkan...'; }
+  else if (state === 'offline')  { syncText.textContent = 'Terputus, menyambung ulang...'; }
 }
 
-// ─────────────────────────────────────────────
-// Mengubah angka menjadi format mata uang Rupiah
-// Contoh: 1500000 → "Rp 1.500.000"
-// ─────────────────────────────────────────────
 function formatCurrency(val) {
   if (val == null || isNaN(val)) return 'Rp 0';
   return 'Rp ' + Math.round(val).toLocaleString('id-ID');
 }
 
-// ─────────────────────────────────────────────
-// Mengubah nilai data menjadi teks siap tampil di sel
-// Untuk tipe 'currency': angka diformat dengan titik ribuan (tanpa "Rp")
-// Untuk tipe lain: ubah menjadi string biasa
-// ─────────────────────────────────────────────
 function displayValue(val, type) {
   if (val == null) return '';
   if (type === 'currency') return Math.round(val).toLocaleString('id-ID');
   return String(val);
 }
 
-// ─────────────────────────────────────────────
-// Memilih semua teks di dalam sebuah elemen secara otomatis
-// Dipakai saat pengguna mengklik sel agar bisa langsung menimpa nilai lama
-// ─────────────────────────────────────────────
 function selectAllContent(el) {
   const range = document.createRange();
   range.selectNodeContents(el);
@@ -782,11 +1049,6 @@ function selectAllContent(el) {
   sel.addRange(range);
 }
 
-// ─────────────────────────────────────────────
-// Menampilkan notifikasi pop-up (toast) di pojok kanan bawah layar
-// Otomatis menghilang setelah 3 detik
-// type: 'info', 'success', 'warn', 'error'
-// ─────────────────────────────────────────────
 function showToast(msg, type = 'info') {
   const toast = document.createElement('div');
   toast.className = `toast toast-${type === 'error' ? 'err' : type}`;
@@ -798,24 +1060,32 @@ function showToast(msg, type = 'info') {
   }, 3000);
 }
 
-// ─────────────────────────────────────────────
-// Mengekspor seluruh data tabel RAB ke file CSV
-// File otomatis terunduh ke komputer dengan nama "RAB_Estimasi.csv"
-// BOM (\uFEFF) ditambahkan agar Excel membaca karakter Indonesia dengan benar
-// ─────────────────────────────────────────────
 function exportCSV() {
-  const headers = ['No', 'Uraian Pekerjaan', 'Volume', 'Satuan', 'Harga Satuan', 'Jumlah', 'Keterangan'];
-  const rows = tableData.map(item => [item.no, `"${item.uraian}"`, item.volume, item.satuan, item.harga_satuan, item.jumlah, `"${item.keterangan}"`].join(','));
-  const csv = [headers.join(','), ...rows].join('\n');
+  const modMap = {};
+  getModuleHeaders().forEach(h => { modMap[h.moduleId] = h.name; });
+
+  const dataRows = tableData.filter(r => !r._type);
+  const headers  = ['No', 'Modul', 'Uraian Pekerjaan', 'Volume', 'Satuan', 'Harga Satuan', 'Jumlah', 'Keterangan'];
+  const rows = dataRows.map(item => [
+    item.no,
+    `"${modMap[item.moduleId] || item.moduleId}"`,
+    `"${item.uraian}"`,
+    item.volume, item.satuan, item.harga_satuan, item.jumlah,
+    `"${item.keterangan}"`
+  ].join(','));
+  const csv  = [headers.join(','), ...rows].join('\n');
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-  const a = document.createElement('a');
+  const a    = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `RAB_Estimasi.csv`;
+  a.download = 'RAB_Estimasi.csv';
   a.click();
 }
 
+// ─────────────────────────────────────────────
+// Sync lock indicator di sel (warna border + label nama user)
+// ─────────────────────────────────────────────
 function syncRemoteLocks() {
-  tableBody.querySelectorAll('.cell-editable').forEach(cell => {
+  document.querySelectorAll('.cell-editable').forEach(cell => {
     const lockKey = `${cell.dataset.itemId}_${cell.dataset.field}`;
     const lockInfo = remoteEditors[lockKey] || activeLocks[lockKey];
     const isOtherLocked = lockInfo && lockInfo.userId !== myId;
@@ -831,4 +1101,166 @@ function syncRemoteLocks() {
       cell.style.boxShadow = '';
     }
   });
+}
+
+/* ════════════════════════════════════════════
+   MODULE BROKER BANNER
+   Muncul DI ATAS / DI LUAR kartu — realtime tanpa reload
+   ════════════════════════════════════════════ */
+
+// ─────────────────────────────────────────────
+// Cek apakah modul ini sedang dibuka/diedit oleh user lain.
+// Cek key '__module_<moduleId>' yang dikirim saat openModuleModal()
+// ─────────────────────────────────────────────
+function isModuleLocked(moduleId) {
+  // Cek module-level lock (user lain punya modal terbuka)
+  const moduleKey = `__module_${moduleId}`;
+  const modLock = remoteEditors[moduleKey] || activeLocks[moduleKey];
+  if (modLock && modLock.userId !== myId) return modLock;
+
+  // Cek cell-level lock (user lain sedang aktif di sel dalam modul ini)
+  const rows   = getModuleRows(moduleId);
+  const fields = ['uraian', 'volume', 'satuan', 'harga_satuan', 'keterangan'];
+  for (const row of rows) {
+    for (const field of fields) {
+      const key  = `${row.id}_${field}`;
+      const lock = remoteEditors[key] || activeLocks[key];
+      if (lock && lock.userId !== myId) return lock;
+    }
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// Re-sync semua broker banner di semua kartu
+// Dipanggil setiap kali editorStart / editorStop / locks diterima
+// ─────────────────────────────────────────────
+function syncAllModuleBrokers() {
+  for (const header of getModuleHeaders()) {
+    const lockInfo = isModuleLocked(header.moduleId);
+    if (lockInfo) showModuleBroker(header.moduleId, lockInfo);
+    else          hideModuleBroker(header.moduleId);
+  }
+
+  // Update tombol Edit: jika modul dikunci orang lain, tambah class 'locked'
+  document.querySelectorAll('[data-module-edit-btn]').forEach(btn => {
+    const moduleId = btn.dataset.moduleEditBtn;
+    const locked   = isModuleLocked(moduleId);
+    if (locked) {
+      btn.classList.add('locked');
+      btn.title = `Dikunci oleh ${locked.name}`;
+    } else {
+      btn.classList.remove('locked');
+      btn.title = '';
+    }
+  });
+}
+
+// ─────────────────────────────────────────────
+// Tampilkan broker banner DI ATAS kartu (di luar .module-card)
+// ─────────────────────────────────────────────
+function showModuleBroker(moduleId, userInfo) {
+  const wrapper = document.querySelector(`[data-module-card="${moduleId}"]`);
+  if (!wrapper) return;
+
+  let banner = wrapper.querySelector('.module-broker-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.className = 'module-broker-banner';
+    // Sisipkan SEBELUM .module-card → tampil di atas kartu, di luar
+    wrapper.insertBefore(banner, wrapper.firstChild);
+  } else {
+    // Reset kelas jika sebelumnya banner completed
+    banner.className = 'module-broker-banner';
+  }
+
+  banner.innerHTML = `
+    <span class="broker-avatar" style="background:${userInfo.color || '#f59e0b'}">
+      ${(userInfo.name || '?').charAt(0).toUpperCase()}
+    </span>
+    <div class="broker-text">
+      <strong>${userInfo.name || 'Seseorang'}</strong> sedang mengedit modul ini
+    </div>
+    <span class="broker-pulse"></span>
+  `;
+
+  // Force reflow agar animasi re-trigger
+  banner.classList.remove('visible');
+  void banner.offsetWidth;
+  banner.classList.add('visible');
+}
+
+// ─────────────────────────────────────────────
+// Tampilkan banner "Selesai Edit" dengan tombol Oke
+// Tidak hilang otomatis sampai user mengeklik tombol Oke
+// ─────────────────────────────────────────────
+function showModuleCompletedBroker(moduleId, userInfo, editedParts = []) {
+  const wrapper = document.querySelector(`[data-module-card="${moduleId}"]`);
+  if (!wrapper) return;
+
+  let banner = wrapper.querySelector('.module-broker-banner');
+  if (banner) banner.remove();
+
+  banner = document.createElement('div');
+  banner.className = 'module-broker-banner completed';
+  wrapper.insertBefore(banner, wrapper.firstChild);
+
+  const shortLabels = {
+    'Nama Bahan': 'Nama',
+    'Harga Satuan': 'Harga',
+    'Keterangan': 'Catatan',
+  };
+  const groupedParts = editedParts.reduce((groups, part) => {
+    const key = String(part.itemNo);
+    const group = groups.find(item => item.itemNo === key);
+    const label = shortLabels[part.fieldLabel] || part.fieldLabel;
+    if (group) {
+      if (!group.fields.includes(label)) group.fields.push(label);
+    } else {
+      groups.push({ itemNo: key, fields: [label] });
+    }
+    return groups;
+  }, []);
+  const editedText = groupedParts.length
+    ? `Diubah: ${groupedParts.slice(0, 3).map(part => `Bahan ${part.itemNo} (${part.fields.join(', ')})`).join('; ')}${groupedParts.length > 3 ? '; lainnya' : ''}`
+    : 'Tidak ada detail bagian';
+
+  banner.innerHTML = `
+    <span class="broker-avatar" style="background:${userInfo.color || '#10b981'}">
+      ${(userInfo.name || '?').charAt(0).toUpperCase()}
+    </span>
+    <div class="broker-text">
+      <strong>${userInfo.name || 'Seseorang'}</strong> telah selesai mengedit modul ini
+      <small>${editedText}</small>
+    </div>
+    <button class="btn-broker-ok">Oke</button>
+  `;
+
+  const btnOk = banner.querySelector('.btn-broker-ok');
+  if (btnOk) {
+    btnOk.addEventListener('click', (e) => {
+      e.stopPropagation();
+      banner.classList.remove('visible');
+      setTimeout(() => banner.remove(), 350);
+    });
+  }
+
+  banner.classList.remove('visible');
+  void banner.offsetWidth;
+  banner.classList.add('visible');
+}
+
+// ─────────────────────────────────────────────
+// Sembunyikan broker banner ketika modul sudah bebas
+// (Tetap tampilkan jika banner dalam kondisi 'completed' sampai tombol Oke diklik)
+// ─────────────────────────────────────────────
+function hideModuleBroker(moduleId) {
+  const wrapper = document.querySelector(`[data-module-card="${moduleId}"]`);
+  if (!wrapper) return;
+  const banner = wrapper.querySelector('.module-broker-banner');
+  if (!banner) return;
+  if (banner.classList.contains('completed')) return;
+
+  banner.classList.remove('visible');
+  setTimeout(() => banner.remove(), 350);
 }
