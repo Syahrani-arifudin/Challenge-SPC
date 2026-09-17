@@ -1,1 +1,2 @@
-Basicly ini adalah php yang berfokus pada sistem komunikasi secara real time menggunakan websocket. 
+Membuat modul sederhana dengan message broker menggunakan websocket php versi module 
+
