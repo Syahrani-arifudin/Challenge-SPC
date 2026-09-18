@@ -1,18 +1,24 @@
 'use strict';
 
+// Strict mode membantu JavaScript mendeteksi kesalahan penggunaan variabel.
+
 // ══════════════════════════════════════════════
 // KONEKSI REALTIME — WebSocket ke server PHP
 // ══════════════════════════════════════════════
+// const dipakai untuk nilai konfigurasi yang tidak perlu diganti.
 const configuredWsUrl = window.RAB_WS_URL || new URLSearchParams(location.search).get('ws');
+// Template string memilih ws atau wss sesuai protokol halaman yang sedang dibuka.
 const WS_URL = configuredWsUrl || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8080`;
 const PROJECT_ID = new URLSearchParams(location.search).get('project') || 'default';
 
+// let dipakai untuk nilai yang akan berubah selama aplikasi berjalan.
 let ws = null;
 
 // ─────────────────────────────────────────────
 // MODUL PRE-DEFINED — 8 modul RAB standar konstruksi
 // Dibuat otomatis saat pertama kali project dibuka
 // ─────────────────────────────────────────────
+// Array [] menyimpan daftar object {} yang mewakili modul bawaan.
 const PREDEFINED_MODULES = [
   { name: 'Pekerjaan Persiapan',  paletteIdx: 0 },
   { name: 'Pekerjaan Pondasi',    paletteIdx: 1 },
@@ -28,12 +34,33 @@ let wsReconnectDelay = 1000;
 const DEBOUNCE = 80;
 const LOCK_TTL = 3000;
 
+function getStoredUserName() {
+  try {
+    const saved = localStorage.getItem('rab_user_name');
+    if (saved && saved.trim()) return saved.trim();
+  } catch (err) {
+    // Browser privacy mode / storage terkunci; lanjut pakai prompt standard.
+  }
+
+  const entered = prompt('Masukan nama anda');
+  const name = (entered && entered.trim()) || 'User';
+
+  try {
+    localStorage.setItem('rab_user_name', name);
+  } catch (err) {
+    // abaikan jika storage tidak tersedia
+  }
+
+  return name;
+}
+
 // User ID & Color
 const myId    = 'user_' + Math.random().toString(36).slice(2, 7);
 const myColor = '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
-const myName  = prompt('Masukan nama anda') || 'User';
+const myName  = getStoredUserName();
 
 // STATE
+// State adalah data sementara yang menjadi sumber tampilan aplikasi.
 let tableData    = [];  // Semua baris + module headers (_type:'moduleHeader')
 let activeLocks  = {};  // Sel yang sedang diedit
 let remoteEditors = {};
@@ -43,6 +70,34 @@ let presenceData = {};
 const remoteEditHistory = {};
 const undoStack = [];
 const changedModuleIds = new Set();
+const DISMISSED_COMPLETED_KEY = 'rab_dismissed_completed_modules';
+
+function getDismissedCompletedModules() {
+  try {
+    const raw = localStorage.getItem(DISMISSED_COMPLETED_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function saveDismissedCompletedModules(ids) {
+  try {
+    localStorage.setItem(DISMISSED_COMPLETED_KEY, JSON.stringify(ids));
+  } catch (err) {
+    // ignore if storage unavailable
+  }
+}
+
+function markModuleCompletedDismissed(moduleId) {
+  const ids = new Set(getDismissedCompletedModules());
+  ids.add(moduleId);
+  saveDismissedCompletedModules([...ids]);
+}
+
+function isModuleCompletedDismissed(moduleId) {
+  return getDismissedCompletedModules().includes(moduleId);
+}
 
 // Module modal state
 let openModuleId = null; // moduleId yang sedang terbuka di modal
@@ -78,11 +133,13 @@ const btnUndo         = document.getElementById('btnUndo');
 // ─────────────────────────────────────────────
 // INISIALISASI
 // ─────────────────────────────────────────────
+// IIFE langsung menjalankan inisialisasi tanpa menunggu pemanggilan manual.
 (function init() {
   userAvatarBadge.style.background = myColor;
   userAvatarBadge.textContent = myName.charAt(0);
   userAvatarBadge.title = myName;
 
+  // Event listener menghubungkan aksi user dengan function aplikasi.
   document.getElementById('btnExport').addEventListener('click', exportCSV);
   btnUndo.addEventListener('click', undoLastEdit);
   document.getElementById('btnCloseModal').addEventListener('click', closeModuleModal);
@@ -132,11 +189,13 @@ const btnUndo         = document.getElementById('btnUndo');
 // WEBSOCKET
 // ─────────────────────────────────────────────
 function connectWS() {
+  // WebSocket membuka koneksi realtime ke server PHP Ratchet.
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
     wsReconnectDelay = 1000;
     setSyncState('ok');
+    // JSON.stringify mengubah object JavaScript menjadi teks JSON untuk dikirim.
     ws.send(JSON.stringify({ type: 'join', projectId: PROJECT_ID, userId: myId }));
     sendHeartbeat();
     if (window.__heartbeatInterval) clearInterval(window.__heartbeatInterval);
@@ -144,6 +203,7 @@ function connectWS() {
   };
 
   ws.onmessage = (event) => {
+    // JSON.parse mengubah teks JSON dari server menjadi object JavaScript.
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'state') {
@@ -156,9 +216,28 @@ function connectWS() {
       updateTotal();
       renderPresence();
       syncAllModuleBrokers(); // tampilkan broker untuk lock yang sudah ada
+      syncCompletedModuleBanners(msg.moduleHistory || {});
 
       const titleEl = document.getElementById('projectName');
       if (titleEl && msg.projectName) titleEl.textContent = msg.projectName;
+      return;
+    }
+
+    if (msg.type === 'moduleComplete') {
+      const payload = msg.payload || {};
+      if (!payload.moduleId) return;
+      showModuleCompletedBroker(payload.moduleId, payload, payload.editedParts || []);
+      const moduleName = getModuleHeaders().find(h => h.moduleId === payload.moduleId)?.name || 'modul';
+      showToast(`${payload.name || 'Seseorang'} telah selesai mengedit ${moduleName}`, 'info');
+      return;
+    }
+
+    if (msg.type === 'clearModuleComplete') {
+      const moduleId = msg.moduleId;
+      if (!moduleId) return;
+      const banner = document.querySelector(`[data-module-card="${moduleId}"] .module-broker-banner`);
+      banner?.classList.remove('visible');
+      setTimeout(() => banner?.remove(), 350);
       return;
     }
 
@@ -208,7 +287,7 @@ function connectWS() {
 
     if (msg.type === 'editorStart') {
       if (msg.editor?.key && msg.editor.userId !== myId) {
-        if (!msg.editor.key.startsWith('__module_')) rememberRemoteEdit(msg.editor);
+        if (!msg.editor.key.startsWith('__module_')) rememberModuleEdit(msg.editor);
         activeLocks[msg.editor.key] = msg.editor;
         remoteEditors[msg.editor.key] = msg.editor;
         syncRemoteLocks();
@@ -224,13 +303,16 @@ function connectWS() {
         syncRemoteLocks();
         syncAllModuleBrokers();
 
-        // Jika ini adalah module lock dari user lain, tampilkan banner "Selesai Edit" dengan tombol Oke
+        // Hanya tampilkan toast/banner saat modul selesai diedit secara keseluruhan,
+        // bukan saat user mengetik di satu cell.
         if (msg.key.startsWith('__module_') && msg.editor && msg.editor.userId !== myId) {
           const moduleId = msg.editor.moduleId || msg.key.replace('__module_', '');
           const historyKey = `${msg.editor.userId}_${moduleId}`;
           const editedParts = remoteEditHistory[historyKey] || [];
           delete remoteEditHistory[historyKey];
           showModuleCompletedBroker(moduleId, msg.editor, editedParts);
+          const moduleName = getModuleHeaders().find(h => h.moduleId === moduleId)?.name || 'modul';
+          showToast(`${msg.editor.name || 'Seseorang'} telah selesai mengedit ${moduleName}`, 'info');
         }
       }
       return;
@@ -319,6 +401,7 @@ function getModuleHeaders() {
 }
 
 function getModuleRows(moduleId) {
+  // filter() menghasilkan array baru yang hanya berisi baris modul tertentu.
   return tableData.filter(r => !r._type && r.moduleId === moduleId);
 }
 
@@ -377,6 +460,7 @@ function renderModules() {
 // Tidak ada tabel di dalam — tabel ada di modal
 // ─────────────────────────────────────────────
 function createModuleCard(header) {
+  // Function ini membuat elemen HTML berdasarkan data modul.
   const moduleId = header.moduleId;
   const palette  = getModulePalette(header);
   const rows     = getModuleRows(moduleId);
@@ -511,10 +595,26 @@ function closeModuleModal() {
   if (!openModuleId) return;
   const moduleId = openModuleId;
   wsSend({ type: 'saveState' }); // ✅ Simpan seluruh perubahan ke DB SQLite saat modal ditutup
+  const editedParts = remoteEditHistory[`${myId}_${moduleId}`] || [];
+  const module = getModuleHeaders().find(header => header.moduleId === moduleId);
+
   if (changedModuleIds.delete(moduleId)) {
-    const module = getModuleHeaders().find(header => header.moduleId === moduleId);
     wsSend({ type: 'action', text: `${myName} mengedit modul ${module?.name || 'ini'}` });
   }
+
+  wsSend({
+    type: 'moduleComplete',
+    moduleId: moduleId,
+    editor: {
+      key: `__module_${moduleId}`,
+      moduleId: moduleId,
+      userId: myId,
+      name: myName,
+      color: myColor,
+    },
+    editedParts,
+  });
+
   releaseModuleLock(moduleId);
   openModuleId = null;
   moduleModal.classList.remove('open');
@@ -753,6 +853,7 @@ function onCellKeydown(e) {
    ════════════════════════════════════════════ */
 
 function saveCell(cell) {
+  // Membaca nilai dari DOM, memperbarui state, lalu mengirim perubahan ke server.
   const itemId = parseInt(cell.dataset.itemId);
   const field  = cell.dataset.field;
   let rawValue = cell.textContent.trim();
@@ -775,6 +876,7 @@ function saveCell(cell) {
     patch.jumlah = vol * hsat;
   }
 
+  // Object.assign menggabungkan property patch ke object item.
   Object.assign(item, patch);
   undoStack.push({
     itemId,
@@ -848,26 +950,31 @@ function sendEditorPresence(cell, isEditing) {
     uraian: 'Nama Bahan', volume: 'Volume', satuan: 'Satuan',
     harga_satuan: 'Harga Satuan', keterangan: 'Keterangan',
   };
-  wsSend(isEditing
-    ? { type: 'editorStart', editor: {
-        key, userId: myId, name: myName, color: myColor, ts: Date.now(),
-        moduleId: cell.dataset.moduleId,
-        itemNo: item?.no || '?',
-        field: cell.dataset.field,
-        fieldLabel: fieldLabels[cell.dataset.field] || cell.dataset.field,
-      } }
-    : { type: 'editorStop',  key, userId: myId });
+  const editor = {
+    key, userId: myId, name: myName, color: myColor, ts: Date.now(),
+    moduleId: cell.dataset.moduleId,
+    itemNo: item?.no || '?',
+    field: cell.dataset.field,
+    fieldLabel: fieldLabels[cell.dataset.field] || cell.dataset.field,
+  };
+
+  if (isEditing) {
+    rememberModuleEdit(editor);
+    wsSend({ type: 'editorStart', editor });
+  } else {
+    wsSend({ type: 'editorStop', key, userId: myId });
+  }
 }
 
-function rememberRemoteEdit(editor) {
-  if (!editor.moduleId || !editor.field) return;
+function rememberModuleEdit(editor) {
+  if (!editor?.moduleId || !editor.field) return;
   const historyKey = `${editor.userId}_${editor.moduleId}`;
   const editedParts = remoteEditHistory[historyKey] || [];
-  const partKey = `${editor.itemNo}_${editor.field}`;
+  const partKey = `${editor.itemNo ?? '?'}_${editor.field}`;
   if (!editedParts.some(part => part.key === partKey)) {
     editedParts.push({
       key: partKey,
-      itemNo: editor.itemNo,
+      itemNo: editor.itemNo ?? '?',
       fieldLabel: editor.fieldLabel || editor.field,
     });
   }
@@ -978,6 +1085,7 @@ function updateComputedJumlah(editedCell) {
 }
 
 function updateTotal() {
+  // reduce() menjumlahkan seluruh nilai jumlah dari baris bahan.
   const total = tableData.filter(r => !r._type).reduce((s, i) => s + (i.jumlah || 0), 0);
   if (totalValueEl) totalValueEl.textContent = formatCurrency(total);
 }
@@ -1061,6 +1169,7 @@ function showToast(msg, type = 'info') {
 }
 
 function exportCSV() {
+  // Blob membuat file sementara di browser tanpa upload ke server.
   const modMap = {};
   getModuleHeaders().forEach(h => { modMap[h.moduleId] = h.name; });
 
@@ -1159,6 +1268,24 @@ function syncAllModuleBrokers() {
 // ─────────────────────────────────────────────
 // Tampilkan broker banner DI ATAS kartu (di luar .module-card)
 // ─────────────────────────────────────────────
+function buildModuleEditContextText(userInfo) {
+  if (!userInfo) return 'modul ini';
+
+  const itemNo = userInfo.itemNo ? `Bahan ${userInfo.itemNo}` : 'modul ini';
+  const fieldLabel = userInfo.fieldLabel || userInfo.field || 'bagian';
+  return `${itemNo} (${fieldLabel})`;
+}
+
+function syncCompletedModuleBanners(moduleHistory) {
+  if (!moduleHistory) return;
+
+  Object.entries(moduleHistory).forEach(([moduleId, item]) => {
+    if (!item || !moduleId) return;
+    if (isModuleCompletedDismissed(moduleId)) return;
+    showModuleCompletedBroker(moduleId, item, item.editedParts || []);
+  });
+}
+
 function showModuleBroker(moduleId, userInfo) {
   const wrapper = document.querySelector(`[data-module-card="${moduleId}"]`);
   if (!wrapper) return;
@@ -1174,12 +1301,14 @@ function showModuleBroker(moduleId, userInfo) {
     banner.className = 'module-broker-banner';
   }
 
+  const contextText = buildModuleEditContextText(userInfo);
+
   banner.innerHTML = `
     <span class="broker-avatar" style="background:${userInfo.color || '#f59e0b'}">
       ${(userInfo.name || '?').charAt(0).toUpperCase()}
     </span>
     <div class="broker-text">
-      <strong>${userInfo.name || 'Seseorang'}</strong> sedang mengedit modul ini
+      <strong>${userInfo.name || 'Seseorang'}</strong> sedang mengedit ${contextText}
     </div>
     <span class="broker-pulse"></span>
   `;
@@ -1195,6 +1324,8 @@ function showModuleBroker(moduleId, userInfo) {
 // Tidak hilang otomatis sampai user mengeklik tombol Oke
 // ─────────────────────────────────────────────
 function showModuleCompletedBroker(moduleId, userInfo, editedParts = []) {
+  if (isModuleCompletedDismissed(moduleId)) return;
+
   const wrapper = document.querySelector(`[data-module-card="${moduleId}"]`);
   if (!wrapper) return;
 
@@ -1240,6 +1371,8 @@ function showModuleCompletedBroker(moduleId, userInfo, editedParts = []) {
   if (btnOk) {
     btnOk.addEventListener('click', (e) => {
       e.stopPropagation();
+      markModuleCompletedDismissed(moduleId);
+      wsSend({ type: 'clearModuleComplete', moduleId: moduleId });
       banner.classList.remove('visible');
       setTimeout(() => banner.remove(), 350);
     });

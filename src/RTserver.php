@@ -10,10 +10,11 @@ use Ratchet\ConnectionInterface;
  */
 class RTserver implements MessageComponentInterface {
 
+    // Property menyimpan koneksi, room project, metadata user, dan state realtime.
     protected $clients;
     protected $rooms = [];   // projectId => SplObjectStorage berisi koneksi
     protected $meta  = [];   // resourceId => ['projectId'=>, 'userId'=>]
-    protected $state = [];   // projectId => ['data'=>[], 'locks'=>[], 'presence'=>[], 'projectName'=>'Proyek Baru']
+    protected $state = [];   // projectId => ['data'=>[], 'locks'=>[], 'presence'=>[], 'projectName'=>'Proyek Baru', 'moduleHistory'=>[]]
     protected $database;
 
     public function __construct(Database $database) {
@@ -26,11 +27,13 @@ class RTserver implements MessageComponentInterface {
     }
 
     public function onMessage($from, $msg) {
+        // Pesan client selalu diterima sebagai teks, lalu diubah menjadi array PHP.
         $data = json_decode($msg, true);
         if (!is_array($data) || !isset($data['type'])) {
             return;
         }
 
+        // switch memilih handler berdasarkan jenis pesan WebSocket.
         switch ($data['type']) {
             case 'join':
                 $this->handleJoin($from, $data);
@@ -60,6 +63,12 @@ class RTserver implements MessageComponentInterface {
                     'editor' => $data['editor'] ?? null,
                 ], $from);
                 break;
+            case 'moduleComplete':
+                $this->handleModuleComplete($from, $data);
+                break;
+            case 'clearModuleComplete':
+                $this->handleClearModuleComplete($from, $data);
+                break;
             case 'presence':
                 $this->handlePresence($from, $data);
                 break;
@@ -76,6 +85,7 @@ class RTserver implements MessageComponentInterface {
     }
 
     protected function ensureState($projectId) {
+        // State project hanya dimuat dari database sekali selama server berjalan.
         if (!isset($this->state[$projectId])) {
             $stored = $this->database->loadProject($projectId);
             // Simpan data sebagai map id => row untuk O(1) patch per baris
@@ -90,6 +100,7 @@ class RTserver implements MessageComponentInterface {
                 'locks'       => new \stdClass(),
                 'presence'    => new \stdClass(),
                 'projectName' => $stored['projectName'],
+                'moduleHistory' => [],
             ];
         }
     }
@@ -116,11 +127,12 @@ class RTserver implements MessageComponentInterface {
         // kirim state lengkap yang sudah ada ke user yang baru join
         // data dikirim sebagai array biasa (bukan map) agar format FE tetap konsisten
         $conn->send(json_encode([
-            'type'        => 'state',
-            'data'        => array_values($this->state[$projectId]['data']),
-            'locks'       => $this->state[$projectId]['locks'],
-            'presence'    => $this->state[$projectId]['presence'],
-            'projectName' => $this->state[$projectId]['projectName'],
+            'type'          => 'state',
+            'data'          => array_values($this->state[$projectId]['data']),
+            'locks'         => $this->state[$projectId]['locks'],
+            'presence'      => $this->state[$projectId]['presence'],
+            'projectName'   => $this->state[$projectId]['projectName'],
+            'moduleHistory' => $this->state[$projectId]['moduleHistory'],
         ]));
     }
 
@@ -163,6 +175,7 @@ class RTserver implements MessageComponentInterface {
      * bukan seluruh tabel.
      */
     protected function handleRowUpdate($from, $data) {
+        // Update satu baris menghemat bandwidth dibanding mengirim seluruh tabel.
         $meta = $this->meta[$from->resourceId] ?? null;
         if (!$meta) return;
         $projectId = $meta['projectId'];
@@ -184,6 +197,7 @@ class RTserver implements MessageComponentInterface {
         }
 
         // Broadcast HANYA 1 baris ke klien lain — inilah penghematannya ✅
+        // Broadcast menyebarkan perubahan ke client lain dalam project yang sama.
         $this->broadcastToRoom($projectId, [
             'type'    => 'rowUpdate',
             'payload' => $row,
@@ -273,7 +287,50 @@ class RTserver implements MessageComponentInterface {
         ], $from); // exclude pengirim, dia sudah lihat toast-nya sendiri lebih dulu
     }
 
+    protected function handleModuleComplete($from, $data) {
+        $meta = $this->meta[$from->resourceId] ?? null;
+        if (!$meta) return;
+
+        $projectId = $meta['projectId'];
+        $moduleId = $data['moduleId'] ?? null;
+        $editor = $data['editor'] ?? null;
+        if (!$moduleId || !$editor) return;
+
+        $this->ensureState($projectId);
+        $this->state[$projectId]['moduleHistory'][$moduleId] = [
+            'moduleId'    => $moduleId,
+            'userId'      => $editor['userId'] ?? $meta['userId'],
+            'name'        => $editor['name'] ?? 'Seseorang',
+            'color'       => $editor['color'] ?? '#10b981',
+            'editedParts' => $data['editedParts'] ?? [],
+            'ts'          => time(),
+        ];
+
+        $this->broadcastToRoom($projectId, [
+            'type'    => 'moduleComplete',
+            'payload' => $this->state[$projectId]['moduleHistory'][$moduleId],
+        ], $from);
+    }
+
+    protected function handleClearModuleComplete($from, $data) {
+        $meta = $this->meta[$from->resourceId] ?? null;
+        if (!$meta) return;
+
+        $projectId = $meta['projectId'];
+        $moduleId = $data['moduleId'] ?? null;
+        if (!$moduleId) return;
+
+        $this->ensureState($projectId);
+        unset($this->state[$projectId]['moduleHistory'][$moduleId]);
+
+        $this->broadcastToRoom($projectId, [
+            'type'    => 'clearModuleComplete',
+            'moduleId' => $moduleId,
+        ], $from);
+    }
+
     protected function broadcastToRoom($projectId, $payload, $exclude = null) {
+        // json_encode mengubah payload PHP menjadi format yang dipahami JavaScript.
         if (!isset($this->rooms[$projectId])) return;
         $message = json_encode($payload);
 
